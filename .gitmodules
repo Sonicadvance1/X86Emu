@@ -1,0 +1,3 @@
+[submodule "External/SonicUtils"]
+	path = External/SonicUtils
+	url = https://github.com/Sonicadvance1/SonicUtils.git
