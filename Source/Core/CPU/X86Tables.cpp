@@ -41,9 +41,9 @@ void InitializeInfoTables() {
     {0x40, 16, X86InstInfo{"", TYPE_REX_PREFIX, FLAGS_NONE, 0, 0}},
 
     // Instructions
-    {0x01, 1, X86InstInfo{"ADD",    TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2, 0, 0}},
-    {0x03, 1, X86InstInfo{"ADD",    TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
-    {0x05, 1, X86InstInfo{"ADD",    TYPE_INST, FLAGS_DISPLACE_SIZE_DIV_2, 4, 0}},
+    {0x01, 1, X86InstInfo{"ADD",    TYPE_INST, FLAGS_DST_MODRM | FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2, 0, 0}},
+    {0x03, 1, X86InstInfo{"ADD",    TYPE_INST, FLAGS_SRC_MODRM | FLAGS_HAS_MODRM,                             0, 0}},
+    {0x05, 1, X86InstInfo{"ADD",    TYPE_INST, FLAGS_SRC_IMM | FLAGS_DISPLACE_SIZE_DIV_2,                     4, 0}},
     {0x08, 4, X86InstInfo{"OR",     TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
     {0x20, 4, X86InstInfo{"AND",    TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
     {0x25, 1, X86InstInfo{"AND",    TYPE_INST, FLAGS_DISPLACE_SIZE_DIV_2, 4, 0}},
@@ -78,11 +78,8 @@ void InitializeInfoTables() {
     {0x7D, 1, X86InstInfo{"JNL",    TYPE_INST, FLAGS_NONE,                1, 0}},
     {0x7E, 1, X86InstInfo{"JLE",    TYPE_INST, FLAGS_NONE,                1, 0}},
     {0x7F, 1, X86InstInfo{"JNLE",   TYPE_INST, FLAGS_NONE,                1, 0}},
-    {0x80, 1, X86InstInfo{"AND",    TYPE_INST, FLAGS_HAS_MODRM,           1, 0}},
-    {0x81, 1, X86InstInfo{"SUB",    TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2, 4, 0}},
-    {0x83, 1, X86InstInfo{"AND",    TYPE_INST, FLAGS_HAS_MODRM,           1, 0}},
-    {0x84, 1, X86InstInfo{"TEST",   TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
-    {0x85, 1, X86InstInfo{"TEST",   TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0x82, 1, X86InstInfo{"[INV]",  TYPE_INVALID, FLAGS_NONE,                0, 0}},
+    {0x84, 2, X86InstInfo{"TEST",   TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
     {0x88, 5, X86InstInfo{"MOV",    TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
     {0x8E, 1, X86InstInfo{"MOV",    TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
     {0x8D, 1, X86InstInfo{"LEA",    TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
@@ -96,20 +93,26 @@ void InitializeInfoTables() {
 
     {0xB0, 8, X86InstInfo{"MOV",    TYPE_INST, FLAGS_REX_IN_BYTE,         1, 0}},
     {0xB8, 8, X86InstInfo{"MOV",    TYPE_INST, FLAGS_REX_IN_BYTE | FLAGS_DISPLACE_SIZE_DIV_2 | FLAGS_DISPLACE_SIZE_MUL_2, 4, 0}},
-    {0xC1, 1, X86InstInfo{"SHR",    TYPE_INST, FLAGS_HAS_MODRM,           1, 0}},
-    {0xC3, 1, X86InstInfo{"RET",    TYPE_INST, FLAGS_BLOCK_END,                0, 0}},
+    {0xC2, 2, X86InstInfo{"RET",    TYPE_INST, FLAGS_SETS_RIP | FLAGS_BLOCK_END,                0, 0}},
+    {0xC4, 2, X86InstInfo{"[INV]",  TYPE_INVALID, FLAGS_NONE,                0, 0}},
     {0xC6, 1, X86InstInfo{"MOV",    TYPE_INST, FLAGS_HAS_MODRM,           1, 0}},
     {0xC7, 1, X86InstInfo{"MOV",    TYPE_INST, FLAGS_HAS_MODRM,           4, 0}},
-    {0xD0, 4, X86InstInfo{"SHL",    TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD4, 3, X86InstInfo{"[INV]",  TYPE_INVALID, FLAGS_NONE,                0, 0}},
 
-    {0xE8, 1, X86InstInfo{"CALL",   TYPE_INST, FLAGS_DISPLACE_SIZE_DIV_2 | FLAGS_BLOCK_END, 4, 0}},
-    {0xE9, 1, X86InstInfo{"JMP",    TYPE_INST, FLAGS_DISPLACE_SIZE_DIV_2 | FLAGS_BLOCK_END, 4, 0}},
-    {0xEB, 1, X86InstInfo{"JMP",    TYPE_INST, FLAGS_BLOCK_END,                             1, 0}},
-    {0xFF, 1, X86InstInfo{"CALL",   TYPE_INST, FLAGS_HAS_MODRM | FLAGS_BLOCK_END,           0, 0}},
+    {0xE8, 1, X86InstInfo{"CALL",   TYPE_INST, FLAGS_SETS_RIP | FLAGS_DISPLACE_SIZE_DIV_2 | FLAGS_BLOCK_END, 4, 0}},
+    {0xE9, 1, X86InstInfo{"JMP",    TYPE_INST, FLAGS_SETS_RIP | FLAGS_DISPLACE_SIZE_DIV_2 | FLAGS_BLOCK_END, 4, 0}},
+    {0xEB, 1, X86InstInfo{"JMP",    TYPE_INST, FLAGS_SETS_RIP | FLAGS_BLOCK_END,                             1, 0}},
 
     // ModRM table
-    {0xF6, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
-    {0xF7, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0x80, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0x81, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0x83, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0xC0, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0xC1, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0xD0, 4, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0xD8, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0xF6, 2, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
+    {0xFF, 1, X86InstInfo{"",   TYPE_MODRM_TABLE_PREFIX, FLAGS_HAS_MODRM, 3, 0}},
   };
 
   const std::vector<std::tuple<uint8_t, uint8_t, X86InstInfo>> TwoByteOpTable = {
@@ -182,6 +185,7 @@ void InitializeInfoTables() {
 
     // SSE
     {0x10, 2, X86InstInfo{"MOVUPS",     TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+    {0x16, 2, X86InstInfo{"MOVHPS",     TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
     {0x29, 1, X86InstInfo{"MOVAPS",     TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
     {0xEB, 1, X86InstInfo{"POR",        TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
 
@@ -206,16 +210,105 @@ void InitializeInfoTables() {
   };
 
   const std::vector<std::tuple<uint16_t, uint8_t, X86InstInfo>> ModRMOpTable = {
+    {0x8000, 1, X86InstInfo{"ADD",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8001, 1, X86InstInfo{"OR",   TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8002, 1, X86InstInfo{"ADC",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8003, 1, X86InstInfo{"SBB",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8004, 1, X86InstInfo{"AND",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8005, 1, X86InstInfo{"SUB",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8006, 1, X86InstInfo{"XOR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8007, 1, X86InstInfo{"CMP",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+
+    {0x8100, 1, X86InstInfo{"ADD",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8101, 1, X86InstInfo{"OR",   TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8102, 1, X86InstInfo{"ADC",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8103, 1, X86InstInfo{"SBB",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8104, 1, X86InstInfo{"AND",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8105, 1, X86InstInfo{"SUB",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8106, 1, X86InstInfo{"XOR",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+    {0x8107, 1, X86InstInfo{"CMP",  TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2,           4, 0}},
+
+    {0x8300, 1, X86InstInfo{"ADD",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8301, 1, X86InstInfo{"OR",   TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8302, 1, X86InstInfo{"ADC",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8303, 1, X86InstInfo{"SBB",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8304, 1, X86InstInfo{"AND",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8305, 1, X86InstInfo{"SUB",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8306, 1, X86InstInfo{"XOR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0x8307, 1, X86InstInfo{"CMP",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+
+    {0xC000, 1, X86InstInfo{"ROL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC001, 1, X86InstInfo{"ROR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC002, 1, X86InstInfo{"RCL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC003, 1, X86InstInfo{"RCR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC004, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC005, 1, X86InstInfo{"SHR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC006, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC007, 1, X86InstInfo{"SAR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+
+    {0xC100, 1, X86InstInfo{"ROL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC101, 1, X86InstInfo{"ROR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC102, 1, X86InstInfo{"RCL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC103, 1, X86InstInfo{"RCR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC104, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC105, 1, X86InstInfo{"SHR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC106, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+    {0xC107, 1, X86InstInfo{"SAR",  TYPE_INST, FLAGS_DST_MODRM | FLAGS_SRC_IMM | FLAGS_HAS_MODRM,           1, 0}},
+
+    {0xD000, 1, X86InstInfo{"ROL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD001, 1, X86InstInfo{"ROR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD002, 1, X86InstInfo{"RCL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD003, 1, X86InstInfo{"RCR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD004, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD005, 1, X86InstInfo{"SHR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD006, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD007, 1, X86InstInfo{"SAR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+
+    {0xD100, 1, X86InstInfo{"ROL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD101, 1, X86InstInfo{"ROR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD102, 1, X86InstInfo{"RCL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD103, 1, X86InstInfo{"RCR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD104, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD105, 1, X86InstInfo{"SHR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD106, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD107, 1, X86InstInfo{"SAR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+
+    {0xD200, 1, X86InstInfo{"ROL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD201, 1, X86InstInfo{"ROR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD202, 1, X86InstInfo{"RCL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD203, 1, X86InstInfo{"RCR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD204, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD205, 1, X86InstInfo{"SHR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD206, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD207, 1, X86InstInfo{"SAR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+
+    {0xD300, 1, X86InstInfo{"ROL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD301, 1, X86InstInfo{"ROR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD302, 1, X86InstInfo{"RCL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD303, 1, X86InstInfo{"RCR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD304, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD305, 1, X86InstInfo{"SHR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD306, 1, X86InstInfo{"SHL",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xD307, 1, X86InstInfo{"SAR",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+
     {0xF600, 2, X86InstInfo{"TEST", TYPE_INST, FLAGS_HAS_MODRM, 1, 0}},
-    {0xF604, 1, X86InstInfo{"MUL", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
-    {0xF606, 1, X86InstInfo{"DIV", TYPE_INST, FLAGS_HAS_MODRM, 1, 0}},
+    {0xF604, 1, X86InstInfo{"MUL",  TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+    {0xF606, 1, X86InstInfo{"DIV",  TYPE_INST, FLAGS_HAS_MODRM, 1, 0}},
     {0xF700, 2, X86InstInfo{"TEST", TYPE_INST, FLAGS_HAS_MODRM | FLAGS_DISPLACE_SIZE_DIV_2, 4, 0}},
-    {0xF702, 1, X86InstInfo{"NOT", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
-    {0xF703, 1, X86InstInfo{"NEG", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
-    {0xF704, 1, X86InstInfo{"MUL", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+    {0xF702, 1, X86InstInfo{"NOT",  TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+    {0xF703, 1, X86InstInfo{"NEG",  TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+    {0xF704, 1, X86InstInfo{"MUL",  TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
     {0xF705, 1, X86InstInfo{"IMUL", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
-    {0xF706, 1, X86InstInfo{"DIV", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+    {0xF706, 1, X86InstInfo{"DIV",  TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
     {0xF707, 1, X86InstInfo{"IDIV", TYPE_INST, FLAGS_HAS_MODRM, 0, 0}},
+
+    {0xFF00, 1, X86InstInfo{"INC",   TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xFF01, 1, X86InstInfo{"DEC",   TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
+    {0xFF02, 1, X86InstInfo{"CALL",  TYPE_INST, FLAGS_SETS_RIP | FLAGS_HAS_MODRM | FLAGS_BLOCK_END,           0, 0}},
+    {0xFF03, 1, X86InstInfo{"CALLF", TYPE_INST, FLAGS_SETS_RIP | FLAGS_HAS_MODRM | FLAGS_BLOCK_END,           0, 0}},
+    {0xFF04, 1, X86InstInfo{"JMP",   TYPE_INST, FLAGS_SETS_RIP | FLAGS_HAS_MODRM | FLAGS_BLOCK_END,           0, 0}},
+    {0xFF05, 1, X86InstInfo{"JMPF",  TYPE_INST, FLAGS_SETS_RIP | FLAGS_HAS_MODRM | FLAGS_BLOCK_END,           0, 0}},
+    {0xFF06, 1, X86InstInfo{"PUSH",  TYPE_INST, FLAGS_HAS_MODRM,           0, 0}},
   };
 
   auto GenerateTable = [](auto& FinalTable, auto& LocalTable) {
@@ -435,6 +528,11 @@ OnceMore:
     DoAgain = true;
   }
   break;
+  case 0xF0: {
+    Flags.Flags |= DECODE_FLAG_LOCK;
+    DoAgain = true;
+  }
+  break;
   default: // Default Base Op
     ;//printf("Default op! 0x%02x\n", Op);
     Info = &BaseOps[Inst[InstructionSize - 1]];
@@ -457,15 +555,15 @@ OnceMore:
     goto OnceMore;
   }
 
-  ;//printf("Instruction: ");
-  if (Info) {
-    ;//printf("%s :", Info->Name);
-  }
-
-  for (uint8_t i = 0; i < InstructionSize; ++i) {
-    ;//printf("%02x ", Instruction[i]);
-  }
-  ;//printf("\n");
+//  printf("Instruction: ");
+//  if (Info) {
+//    printf("%s :", Info->Name);
+//  }
+//
+//  for (uint8_t i = 0; i < InstructionSize; ++i) {
+//    printf("%02x ", Instruction[i]);
+//  }
+//  printf("\n");
   Flags.Size = InstructionSize;
   return std::make_pair(Info ? Info->Type == TYPE_UNKNOWN ? nullptr : Info : nullptr, Flags);
 }

@@ -7,7 +7,7 @@
 
 namespace Emu::IR {
 
-class IntrusiveIRList {
+class IntrusiveIRList final {
 public:
   IntrusiveIRList(size_t InitialSize) {
     IRList.resize(InitialSize);
@@ -25,8 +25,11 @@ public:
   void CheckSize() { if ((CurrentOffset + sizeof(T)) > IRList.size()) IRList.resize(IRList.size() * 2); }
 
   // XXX: Clean this up
+  template <class T>
+  using IRPair = std::pair<T*, AlignmentType>;
+
   template<class T, IROps T2>
-  std::pair<T*, AlignmentType> AllocateOp() {
+  IRPair<T> AllocateOp() {
     size_t OpEnum = IR::IRSizes[T2];
     CheckSize<T>();
     auto Op = reinterpret_cast<T*>(&IRList.at(CurrentOffset));
@@ -55,6 +58,8 @@ public:
   T const* GetOpAs(size_t Offset) const {
     return reinterpret_cast<T const*>(&IRList.at(Offset));
   }
+
+  void Dump() const { Emu::IR::Dump(this); }
 
 private:
   AlignmentType CurrentOffset{0};

@@ -25,18 +25,20 @@ bool Memmap::AllocateSHMRegion(size_t Size) {
   }
 
   SHMSize = Size;
+  Base = MapRegion(0, SHMSize, false);
+  printf("Base Ptr: %p\n", Base);
   return true;
 }
 
-void *Memmap::MapRegion(size_t Offset, size_t Size) {
-  void *Ptr = mmap(0, Size, PROT_READ | PROT_WRITE,
-      MAP_SHARED, SHMfd, Offset);
+void *Memmap::MapRegion(size_t Offset, size_t Size, bool Fixed) {
+  void *Ptr = mmap((void*)((uintptr_t)Base+Offset), Size, PROT_READ | PROT_WRITE,
+      MAP_SHARED | (Fixed ? MAP_FIXED : 0), SHMfd, Offset);
 
   if (Ptr == MAP_FAILED) {
     LogMan::Msg::A("Failed to map memory region");
     return nullptr;
   }
-  printf("Mapped region: %p %zx\n", Ptr, Size);
+  printf("Mapped region: 0x%zx -> %p %zx\n", Offset, Ptr, Size);
   MappedRegions.emplace_back(MemRegion{Ptr, Offset, Size});
   return Ptr;
 }

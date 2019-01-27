@@ -1,19 +1,26 @@
+#include "Core/CPU/IntrusiveIRList.h"
+#include "Core/CPU/CPUBackend.h"
+#include "Core/CPU/CPUCore.h"
 #include "ELFLoader.h"
 #include "LogManager.h"
-#include <cstring>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <unicorn/unicorn.h>
-#include <unicorn/x86.h>
 
-uint64_t AlignUp(uint64_t value, uint64_t size) {
-  return value + (size - value % size) % size;
-};
-uint64_t AlignDown(uint64_t value, uint64_t size) {
-  return value - value % size;
-};
-constexpr uint64_t PAGE_SIZE = 4096;
-constexpr uint64_t FS_OFFSET = 0xb0000000;
+#include <llvm/InitializePasses.h>
+#include <llvm/LinkAllPasses.h>
+#include <llvm/PassRegistry.h>
+#include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/ExecutionEngine/GenericValue.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/IRPrintingPasses.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Type.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#include <llvm-c/Core.h>
 
 void MsgHandler(LogMan::DebugLevels Level, std::string const &Message) {
   const char *CharLevel{nullptr};
@@ -41,658 +48,425 @@ void MsgHandler(LogMan::DebugLevels Level, std::string const &Message) {
   printf("[%s] %s\n", CharLevel, Message.c_str());
 }
 
-void ErrorHandler(std::string const &Message) {
-  printf("[ERR] %s\n", Message.c_str());
+void AssertHandler(std::string const &Message) {
+  printf("[ASSERT] %s\n", Message.c_str());
 }
 
-static void hook_block(uc_engine *uc, uint64_t address, uint32_t size,
-                       void *user_data) {
-  ELFLoader::ELFContainer *file = reinterpret_cast<ELFLoader::ELFContainer*>(user_data);
-  auto Sym = file->GetSymbolInRange(std::make_pair(address, address));
-  std::string Name = "???";
-  if (Sym)
-    Name = Sym->Name;
-  printf(">>> Tracing basic block at 0x%zx('%s'), block size = 0x%x\n", address,
-      Name.c_str(),
-      size);
+class LLVMIRVisitor final {
+public:
+  LLVMIRVisitor();
+  ~LLVMIRVisitor();
+  void *Visit(Emu::IR::IntrusiveIRList const *ir);
 
+private:
+  llvm::LLVMContext *con;
+  LLVMContextRef conref;
+	llvm::Module *mainmodule;
+  llvm::IRBuilder<> *builder;
+  llvm::Function *func;
+  std::vector<llvm::ExecutionEngine*> functions;
+};
+
+LLVMIRVisitor::LLVMIRVisitor() {
+	using namespace llvm;
+	InitializeNativeTarget();
+	InitializeNativeTargetAsmPrinter();
+	conref = LLVMContextCreate();
+  con = *llvm::unwrap(&conref);
+	mainmodule = new llvm::Module("Main Module", *con);
+  builder = new IRBuilder<>(*con);
 }
 
-static void hook_code64(uc_engine *uc, uint64_t address, uint32_t size,
-                        void *user_data) {
-
-  ELFLoader::ELFContainer *file = reinterpret_cast<ELFLoader::ELFContainer*>(user_data);
-  uint64_t rip;
-
-  uc_reg_read(uc, UC_X86_REG_RIP, &rip);
-  printf(">>> Tracing instruction at 0x%" PRIx64 ", instruction size = 0x%x\n",
-         address, size);
-
-  auto Sym = file->GetSymbol(rip);
-  if (!Sym)
-    Sym = file->GetSymbolInRange(std::make_pair(rip, rip + size));
-  std::string Name = "???";
-  if (Sym)
-    Name = Sym->Name;
-  printf(">>> RIP is 0x%" PRIx64 " %s\n", rip, Name.c_str());
+LLVMIRVisitor::~LLVMIRVisitor() {
+  delete builder;
+  for (auto module : functions)
+    delete module;
+	LLVMContextDispose(conref);
 }
 
-static void hook_unmapped(uc_engine *uc, uc_mem_type type, uint64_t address,
-                          int size, int64_t value, void *user_data) {
-  uint64_t rip;
+void *LLVMIRVisitor::Visit(Emu::IR::IntrusiveIRList const *ir) {
+  using namespace llvm;
 
-  uc_reg_read(uc, UC_X86_REG_RIP, &rip);
-  printf(">>> RIP is 0x%" PRIx64 "\n", rip);
+  std::string FunctionName = "Function";
+	auto testmodule = new llvm::Module("Main Module", *con);
 
-  printf("Attempted to access 0x%zx with type %d, size 0x%08x\n", address, type,
-         size);
-}
+	SmallVector<std::string, 0> attrs;
+	std::string arch = "";
+	std::string cpu = "haswell";
 
-static void hook_printf(uc_engine *uc, uint64_t address, uint32_t size,
-                        void *user_data) {
-  char Txt[512];
-  memset(Txt, 0, sizeof(Txt));
+  auto engine_builder = EngineBuilder(std::unique_ptr<llvm::Module>(testmodule));
+	engine_builder.setEngineKind(EngineKind::JIT);
+	TargetOptions opts;
 
-  uint64_t CurrentArgument = 1;
-  uint64_t CurrentFloatArgument = 0;
-  std::array<uc_x86_reg, 6> ArgumentOrdering = {
-      UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX,
-      UC_X86_REG_RCX, UC_X86_REG_R8D, UC_X86_REG_R9D,
+	Triple test("x86_64", "None", "Unknown");
+
+	TargetMachine* target = engine_builder.selectTarget(
+		test,
+		arch, cpu, attrs);
+	if (target == nullptr) {
+		printf("Couldn't select target");
+		return nullptr;
+	}
+	auto engine = engine_builder.create(target);
+
+  auto functype = FunctionType::get(Type::getInt64Ty(*con), {Type::getInt64Ty(*con)}, false);
+  func = Function::Create(functype,
+      Function::ExternalLinkage,
+      FunctionName,
+      testmodule);
+
+  func->setCallingConv(CallingConv::C);
+
+  size_t Size = ir->GetOffset();
+  size_t i = 0;
+  BasicBlock *curblock = nullptr;
+  BasicBlock *entryblock = nullptr;
+  std::unordered_map<size_t, BasicBlock*> block_locations;
+  std::unordered_map<size_t, Value*> Values;
+
+  struct FixupData {
+    size_t From;
+    BasicBlock *block;
   };
-  std::array<uc_x86_reg, 8> FloatArgumentOrdering = {
-      UC_X86_REG_XMM0, UC_X86_REG_XMM1, UC_X86_REG_XMM2, UC_X86_REG_XMM3,
-      UC_X86_REG_XMM4, UC_X86_REG_XMM5, UC_X86_REG_XMM6,
-  };
-  if (0) {
-    int64_t rax = 0xDEADBEEFBAD0DAD1;
-    int64_t rbx = 0xDEADBEEFBAD0DAD1;
-    int64_t rcx = 0xDEADBEEFBAD0DAD1;
-    int64_t rdx = 0xDEADBEEFBAD0DAD1;
-    int64_t rsi = 0xDEADBEEFBAD0DAD1;
-    int64_t rdi = 0xDEADBEEFBAD0DAD1;
-    int64_t r8 = 0xDEADBEEFBAD0DAD1;
-    int64_t r9 = 0xDEADBEEFBAD0DAD1;
-    int64_t r10 = 0xDEADBEEFBAD0DAD1;
-    int64_t r11 = 0xDEADBEEFBAD0DAD1;
-    int64_t r12 = 0xDEADBEEFBAD0DAD1;
-    int64_t r13 = 0xDEADBEEFBAD0DAD1;
-    int64_t r14 = 0xDEADBEEFBAD0DAD1;
-    int64_t r15 = 0xDEADBEEFBAD0DAD1;
-
-    int64_t rsp = 0x200000;
-
-    uc_reg_read(uc, UC_X86_REG_RAX, &rax);
-    uc_reg_read(uc, UC_X86_REG_RBX, &rbx);
-    uc_reg_read(uc, UC_X86_REG_RCX, &rcx);
-    uc_reg_read(uc, UC_X86_REG_RDX, &rdx);
-    uc_reg_read(uc, UC_X86_REG_RSI, &rsi);
-    uc_reg_read(uc, UC_X86_REG_RDI, &rdi);
-    uc_reg_read(uc, UC_X86_REG_R8, &r8);
-    uc_reg_read(uc, UC_X86_REG_R9, &r9);
-    uc_reg_read(uc, UC_X86_REG_R10, &r10);
-    uc_reg_read(uc, UC_X86_REG_R11, &r11);
-    uc_reg_read(uc, UC_X86_REG_R12, &r12);
-    uc_reg_read(uc, UC_X86_REG_R13, &r13);
-    uc_reg_read(uc, UC_X86_REG_R14, &r14);
-    uc_reg_read(uc, UC_X86_REG_R15, &r15);
-    uc_reg_read(uc, UC_X86_REG_RSP, &rsp);
-
-    printf(">>> RAX = 0x%" PRIx64 "\n", rax);
-    printf(">>> RBX = 0x%" PRIx64 "\n", rbx);
-    printf(">>> RCX = 0x%" PRIx64 "\n", rcx);
-    printf(">>> RDX = 0x%" PRIx64 "\n", rdx);
-    printf(">>> RSI = 0x%" PRIx64 "\n", rsi);
-    printf(">>> RDI = 0x%" PRIx64 "\n", rdi);
-    printf(">>> R8 = 0x%" PRIx64 "\n", r8);
-    printf(">>> R9 = 0x%" PRIx64 "\n", r9);
-    printf(">>> R10 = 0x%" PRIx64 "\n", r10);
-    printf(">>> R11 = 0x%" PRIx64 "\n", r11);
-    printf(">>> R12 = 0x%" PRIx64 "\n", r12);
-    printf(">>> R13 = 0x%" PRIx64 "\n", r13);
-    printf(">>> R14 = 0x%" PRIx64 "\n", r14);
-    printf(">>> R15 = 0x%" PRIx64 "\n", r15);
-    printf(">>> RSP = 0x%" PRIx64 "\n", rsp);
-  }
-  uint64_t rdi;
-  uc_reg_read(uc, UC_X86_REG_RDI, &rdi);
-
-  uc_mem_read(uc, rdi, &Txt, sizeof(Txt));
-
-  size_t StringSize = std::min(strlen(Txt), 512ul);
-
-  std::ostringstream outString;
-  for (size_t i = 0; i < StringSize; ++i) {
-    if (Txt[i] == '%') {
-      std::string Argument = "%";
-      ++i;
-      if (Txt[i] == '%') {
-        outString << Txt[i];
+  // Destination
+  std::unordered_map<size_t, FixupData> RequiredFixups;
+  Value *ContextData;
+  while (i != Size) {
+    auto op = ir->GetOp(i);
+    using namespace Emu::IR;
+    switch (op->Op) {
+    case OP_BEGINFUNCTION:
+    case OP_ENDFUNCTION:
+    break;
+    case OP_BEGINBLOCK: {
+      LogMan::Throw::A(curblock == nullptr, "Oops, hit begin block without ending the other one.");
+      curblock = BasicBlock::Create(*con, "block", func);
+      block_locations[i] = curblock;
+      if (entryblock == nullptr) {
+        entryblock = curblock;
       }
-
-      if (i >= StringSize)
-        break;
-
-      Argument += Txt[i];
-      switch (Txt[i]) {
-      case 's':
-        if (CurrentArgument > ArgumentOrdering.size()) {
-          outString << "STACK";
-        } else {
-          char TmpTxt[512];
-          uint64_t reg;
-          memset(TmpTxt, 0, sizeof(TmpTxt));
-
-          uc_reg_read(uc, ArgumentOrdering[CurrentArgument], &reg);
-          uc_mem_read(uc, reg, &TmpTxt, sizeof(TmpTxt));
-
-          outString << TmpTxt;
-          CurrentArgument++;
+      auto it = RequiredFixups.find(i);
+      if (it != RequiredFixups.end()) {
+        // Something is trying to jump to this location
+        // This only happens on forward jumps!
+        RequiredFixups.erase(it);
+        builder->SetInsertPoint(it->second.block);
+        auto FromOp = ir->GetOp(it->second.From);
+        switch (FromOp->Op) {
+//        case OP_COND_JUMP: {
+//          auto Op = op->C<IROp_CondJump>();
+//
+//        }
+//        break;
+        case OP_JUMP: {
+          auto Op = op->C<IROp_Jump>();
+          builder->CreateBr(curblock);
         }
         break;
-      case 'd':
-        int64_t reg;
-        uc_reg_read(uc, ArgumentOrdering[CurrentArgument], &reg);
-        outString << reg;
-        CurrentArgument++;
-        break;
-      case 'p': {
-        uint64_t reg;
-
-        uc_reg_read(uc, ArgumentOrdering[CurrentArgument], &reg);
-
-        outString << std::hex << reg;
-        CurrentArgument++;
-      } break;
-      default:
-        outString << "???(" << Txt[i] << ")";
+        default:
+          LogMan::Msg::A("Unknown Source inst type!");
+        }
       }
-    } else {
-      outString << Txt[i];
+      builder->SetInsertPoint(curblock);
     }
-  }
-
-  printf("%s%s", outString.str().c_str(), user_data ? "\n" : "");
-
-  // Let's return early to not have to do the emulated printf
-  if (0) {
-    uint64_t rsp;
-    uint64_t rip;
-    uc_reg_read(uc, UC_X86_REG_RSP, &rsp);
-    uc_mem_read(uc, rsp, &rip, sizeof(rip));
-    rsp += 8;
-    uc_reg_write(uc, UC_X86_REG_RIP, &rip);
-  }
-  // uc_emu_stop(uc);
-}
-static struct uc_struct *CurrentUC;
-class FD {
-public:
-  FD(int fd, const char *pathname, int flags, mode_t mode)
-    : FDesc{fd}
-    , Name{pathname}
-    , Flags{flags}
-    , Mode{mode} {
-  }
-
-  ssize_t writev(int fd, uint64_t iov, int iovcnt) {
-    ssize_t FinalSize = 0;
-    printf("writev: %d 0x%zx %d\n", fd, iov, iovcnt);
-    for (int i = 0; i < iovcnt; ++i) {
-      struct {
-        uint64_t iov_base;
-        size_t iov_len;
-      } iovObject;
-      uc_mem_read(CurrentUC, iov, &iovObject, sizeof(iovObject));
-      iov += sizeof(iovObject);
-      std::vector<uint8_t> Tmp;
-      Tmp.resize(iovObject.iov_len);
-      uc_mem_read(CurrentUC, iovObject.iov_base, &Tmp.at(0), iovObject.iov_len);
-      printf("\t 0x%zx Size: 0x%zx\n", iovObject.iov_base, iovObject.iov_len);
-      printf("\t %s\n", &Tmp.at(0));
-      FinalSize += iovObject.iov_len;
-
-    }
-    return FinalSize;
-  }
-  int FDesc{0};
-  std::string Name;
-  int Flags;
-  mode_t Mode;
-};
-
-class FileMapper {
-public:
-  ssize_t writev(int fd, uint64_t iov, int iovcnt) {
-    auto fdp = FDMap.find(fd);
-    if (fdp == FDMap.end())
-      return -1;
-    return fdp->second->writev(fd, iov, iovcnt);
-  }
-
-  int openat(int dirfd, const char *pathname, int flags, mode_t mode) {
-    int32_t fdNum = CurrentFD;
-    printf("Opened file: %s with fd: %d\n", pathname, fdNum);
-    FD FDObject{fdNum, pathname, flags, mode};
-    auto fd = &FDs.emplace_back(FDObject);
-    FDMap[CurrentFD] = fd;
-    CurrentFD++;
-    return fdNum;
-  }
-
-  int32_t CurrentFD{0};
-  std::vector<FD> FDs;
-  std::unordered_map<int32_t, FD*> FDMap;
-};
-
-static uint64_t DataSpace = 0;
-static uint64_t DataSpaceSize = 0;
-static FileMapper FDMapper;
-
-static void hook_syscall(struct uc_struct *uc, void *user_data) {
-  CurrentUC = uc;
-  uint64_t rip, rax, rdi, rsi, rdx, r10, r8, r9;
-
-  uc_reg_read(uc, UC_X86_REG_RIP, &rip);
-  uc_reg_read(uc, UC_X86_REG_RAX, &rax);
-  uc_reg_read(uc, UC_X86_REG_RDI, &rdi);
-  uc_reg_read(uc, UC_X86_REG_RSI, &rsi);
-  uc_reg_read(uc, UC_X86_REG_RDX, &rdx);
-  uc_reg_read(uc, UC_X86_REG_R10, &r10);
-  uc_reg_read(uc, UC_X86_REG_R8, &r8);
-  uc_reg_read(uc, UC_X86_REG_R9, &r9);
-
-  // The kernel interface uses %rdi, %rsi, %rdx, %r10, %r8 and %r9.
-  printf(">>> SYSCALL RIP is 0x%zx, SYSCALL is %zd\n", rip, rax);
-
-  switch (rax) {
-  default:
-    rax = -1;
-    LogMan::Msg::E("Unknown syscall\n");
-    uc_emu_stop(uc);
     break;
-  case 12 :{ //__NR_brk
-    constexpr uint64_t DataOffset = 0xa00000000;
-
-    int64_t memoryBase = rdi;
-
-    if (memoryBase == 0) {
-      rax = DataOffset;
-      DataSpace = DataOffset;
+    case OP_ENDBLOCK: {
+      curblock = nullptr;
     }
-    else {
-      // Unmap anything we could have previously had mapped here
-      uc_mem_unmap(uc, DataSpace, AlignUp(DataSpaceSize, PAGE_SIZE)); // We don't care if you fail
-      uint64_t addedSize = memoryBase - DataSpace;
+    break;
+    case OP_ALLOCATE_CONTEXT: {
+      auto Op = op->C<IROp_AllocateContext>();
+      ContextData = builder->CreateAlloca(ArrayType::get(Type::getInt64Ty(*con), Op->Size / 8));
+    }
+    break;
+    case OP_STORECONTEXT: {
+      auto Op = op->C<IROp_StoreContext>();
+      auto location = builder->CreateGEP(ContextData,
+          {
+            builder->getInt32(0),
+            builder->getInt32(Op->Offset / 8),
+          },
+          "ContextLoad");
+      builder->CreateStore(Values[Op->Arg], location);
+    }
+    break;
+    case OP_LOADCONTEXT: {
+      auto Op = op->C<IROp_LoadContext>();
+      auto location = builder->CreateGEP(ContextData,
+          {
+            builder->getInt32(0),
+            builder->getInt32(Op->Offset / 8),
+          },
+          "ContextLoad");
+      Values[i] = builder->CreateLoad(location);
+    }
+    break;
+    case OP_GETARGUMENT: {
+      auto Op = op->C<IROp_GetArgument>();
+      Values[i] = func->arg_begin() + Op->Argument;
+    }
+    break;
+    case OP_ADD: {
+      auto Op = op->C<IROp_Add>();
+      Values[i] = builder->CreateAdd(Values[Op->Args[0]], Values[Op->Args[1]]);
+    }
+    break;
+    case OP_SUB: {
+      auto Op = op->C<IROp_Sub>();
+      Values[i] = builder->CreateSub(Values[Op->Args[0]], Values[Op->Args[1]]);
+    }
+    break;
+    case OP_SHL: {
+      auto Op = op->C<IROp_Shl>();
+      Values[i] = builder->CreateShl(Values[Op->Args[0]], Values[Op->Args[1]]);
+    }
+    break;
+    case OP_CONSTANT: {
+      auto Op = op->C<IROp_Constant>();
+      Values[i] = builder->getInt64(Op->Constant);
+    }
+    break;
+    case OP_LOAD_MEM: {
+      auto Op = op->C<IROp_LoadMem>();
 
-      // rax = 0xa... + 0
-
-      DataSpaceSize += addedSize;
-
-      rax = DataSpace + DataSpaceSize;
-
-      printf("Incrementing size by: 0x%zx\n", addedSize);
-      uc_err err = uc_mem_map(uc, DataSpace, AlignUp(DataSpaceSize, PAGE_SIZE), UC_PROT_ALL);
-      if (err) {
-        printf("Failed on uc_mem_map() with error returned %u: %s\n", err,
-            uc_strerror(err));
+      Value *Src;
+      switch (Op->Size) {
+      case 4:
+        Src = builder->CreateIntToPtr(Values[Op->Arg[0]], Type::getInt32PtrTy(*con));
+      break;
+      case 8:
+        Src = builder->CreateIntToPtr(Values[Op->Arg[0]], Type::getInt64PtrTy(*con));
+      break;
+      default:
+        printf("Unknown LoadSize: %d\n", Op->Size);
+        std::abort();
+      break;
       }
-
-      LogMan::Throw::A(!err, "Failed Stack Map");
-
+      Values[i] = builder->CreateLoad(Src);
     }
-  }
-  break;
-  case 0: // __NR_read
-  case 2: // __NR_open
-  case 3: // __NR_close
-  case 8: // __NR_lseek
-  case 13: // __NR_rt_sigaction
-  case 14: // __NR_rt_sigprocmask
-  case 202: // __NR_futex
-    rax = 0;
-  break;
-  case 1: { // __NR_write
-    // rdi = file
-    // rsi = buf
-    // rdx = bytes
-    char tmp[512];
-    uc_mem_read(uc, rsi, &tmp, rdx);
-    rax = write(rdi, tmp, rdx);
-  }
-  break;
-  case 5: { // __NR_fstat
-    // rdi = fd
-    // rsi = stat*
-    if (rdi == STDOUT_FILENO || rdi == STDERR_FILENO) {
-      struct stat tmp;
-      rax = fstat(rdi, &tmp);
-      uc_mem_write(uc, rsi, &tmp, sizeof(tmp));
+    break;
+    case OP_COND_JUMP: {
+      auto Op = op->C<IROp_CondJump>();
+      if (i > Op->Target) {
+        // Conditional backwards jump
+        // IR doesn't split the block on the false path
+        // LLVM splits the block at all branches
+        auto FalsePath = BasicBlock::Create(*con, "false", func);
+
+        auto Comp = builder->CreateICmpNE(Values[Op->Cond], builder->getInt64(0));
+        builder->CreateCondBr(Comp, block_locations[Op->Target], FalsePath);
+        builder->SetInsertPoint(FalsePath);
+        curblock = FalsePath;
+        block_locations[i] = curblock;
+      }
+      else {
+        // Conditional forward jump
+        FixupData data;
+        data.From = i;
+        data.block = curblock;
+        RequiredFixups[Op->Target] = data;
+      }
     }
-    else {
-      printf("Attempting to stat: %ld\n", rdi);
-      uc_emu_stop(uc);
+    break;
+    case OP_JUMP: {
+      auto Op = op->C<IROp_Jump>();
+      if (i > Op->Target) {
+        // Backwards jump
+        builder->CreateBr(block_locations[Op->Target]);
+      }
+      else {
+        // Forward jump
+        FixupData data;
+        data.From = i;
+        data.block = curblock;
+        RequiredFixups[Op->Target] = data;
+      }
     }
-  }
-  break;
-  case 9: { // __NR_mmap
-    // rdi = addr
-    // rsi = len
-    // rdx = prot
-    // r10 = flags
-    // r8 = fd
-    // r9 = off
-    uc_emu_stop(uc);
-  }
-  break;
-  case 20: { // __NR_writev
-    // rdi = fd
-    // rsi = iov
-    // rdx = iovcnt
-    rax = FDMapper.writev(rdi, rsi, rdx);
-  break;
-  }
-  case 21: { // __NR_access
-    char tmp[512];
-    uc_mem_read(uc, rdi, &tmp, 512);
-    printf("Trying to read access of : %s\n", tmp);
-    rax = -1;
-  break;
-  }
-  case 89: // __NR_readlink
-    rax = -1;
-    char tmp[512];
-    uc_mem_read(uc, rdi, &tmp, 512);
-    printf("Trying to readlink of : %s\n", tmp);
-  break;
-  case 60: // __NR_exit
-    printf("Program exited with: %zd\n", rdi);
-    uc_emu_stop(uc);
-  break;
-  case 63: { // __NR_uname
-    // RSI contains pointer to utsname structure
-    struct _utsname {
-      char sysname[65];
-      char nodename[65];
-      char release[65];
-      char version[65];
-      char machine[65];
-    };
-    _utsname local;
-    uc_mem_read(uc, rsi, &local, sizeof(local));
-
-    const char Name[] = "Linux\0";
-    const char Version[] = "4.19\0";
-    strcpy(local.release, Version);
-//    uc_mem_write(uc, local.ptrs[0], Name, sizeof(Name));
-
-    uc_mem_write(uc, rdi, &local, sizeof(local));
-    rax = 0;
-  //  uc_emu_stop(uc);
-  }
-  break;
-  case 39: // __NR_getpid
-    rax = 1;
-  break;
-  case 102: // __NR_getuid
-    rax = 1;
-  break;
-  case 104: // __NR_getgid
-    rax = 1;
-  break;
-  case 107: //__NR_geteuid
-    rax = 1;
-  break;
-  case 108: // __NR_getegid
-    rax = 1;
-  break;
-  case 158: { // __NR_arch_prctl
-    uint64_t option = rdi;
-    switch (option) {
-    case 0x1002: { // ARCH_SET_FS
-    // rdi = option
-    // rsi = ptr
-
-//      uc_reg_write(uc, UC_X86_REG_FS, &rsi); // XXX: Is this actually from RSI?
-
-        uc_x86_msr Val;
-        Val.rid = 0xC0000100;
-        Val.value = rsi;
-        uc_reg_write(uc, UC_X86_REG_MSR, &Val);
-//      uc_emu_stop(uc);
-
-      rax = 0;
+    break;
+    case OP_RETURN: {
+      auto Op = op->C<IROp_Return>();
+      builder->CreateRet(Values[Op->Arg]);
     }
     break;
     default:
-      LogMan::Msg::E("Unknown prctl\n");
-      uc_emu_stop(uc);
+      LogMan::Msg::A("Unknown Op: ", Emu::IR::GetName(op->Op).data());
+    break;
     }
+    i += Emu::IR::GetSize(op->Op);
   }
-  break;
-  case 186: // __NR_gettid
-    rax = 1;
-  break;
-  case 228: { // __NR_clock_gettime
-    // rdi = which_clock
-    // rsi = tp
-    printf("Attempting to get time %d to %zx\n", rdi, rsi);
-  //  uc_emu_stop(uc);
-    timespec tmp;
-    int res = clock_gettime(rdi, &tmp);
-    uc_mem_write(uc, rsi, &tmp, sizeof(tmp));
-    rax = 0;
-  break;
-  }
-  case 234: // __NR_tgkill
-    rax = 0;
-  break;
-  case 257: { //__NR_openat
-    // rdi = dfd = -100
-    // rsi = filename = /dev/tty
-    // rdx = flags = 0x902 = O_NONBLOCK | O_NOCTTY | O_RDWR
-    // r10 = mode = 0
+  legacy::PassManager PM;
+  PassManagerBuilder PMBuilder;
+  PMBuilder.OptLevel = 2;
+  raw_ostream& out = outs();
+  PM.add(createPrintModulePass(out));
 
-    char tmp[512];
-    uc_mem_read(uc, rsi, &tmp, 512);
-    printf("Trying to openat of : %s\n", tmp);
-    rax = FDMapper.openat(rdi, tmp, rdx, r10);
-   // uc_emu_stop(uc);
+  verifyModule(*testmodule, &out);
+  PMBuilder.populateModulePassManager(PM);
+  PM.run(*testmodule);
+  engine->finalizeObject();
 
-  break;
-  }
-  }
-  uc_reg_write(uc, UC_X86_REG_RAX, &rax);
-}
-
-void TestUnicorn(ELFLoader::ELFContainer &file) {
-  uc_engine *uc;
-  uc_err err;
-  std::vector<uc_hook> hooks;
-
-  int64_t rax = 0xDEADBEEFBAD0DAD1;
-  int64_t rbx = 0xDEADBEEFBAD0DAD1;
-  int64_t rcx = 0xDEADBEEFBAD0DAD1;
-  int64_t rdx = 0xDEADBEEFBAD0DAD1;
-  int64_t rsi = 0xDEADBEEFBAD0DAD1;
-  int64_t rdi = 0xDEADBEEFBAD0DAD1;
-  int64_t r8 = 0xDEADBEEFBAD0DAD1;
-  int64_t r9 = 0xDEADBEEFBAD0DAD1;
-  int64_t r10 = 0xDEADBEEFBAD0DAD1;
-  int64_t r11 = 0xDEADBEEFBAD0DAD1;
-  int64_t r12 = 0xDEADBEEFBAD0DAD1;
-  int64_t r13 = 0xDEADBEEFBAD0DAD1;
-  int64_t r14 = 0xDEADBEEFBAD0DAD1;
-  int64_t r15 = 0xDEADBEEFBAD0DAD1;
-
-  int64_t rsp = 0x200000;
-  int64_t rip = 0;
-  uint64_t fs = 0x0;
-
-  auto MemLayout = file.GetLayout();
-  printf("Emulate x86_64 code\n");
-
-  // Initialize emulator in X86-64bit mode
-  err = uc_open(UC_ARCH_X86, UC_MODE_64, &uc);
-  LogMan::Throw::A(!err, "Failed on uc_open()");
-
-  uint64_t BasePtr = AlignDown(std::get<0>(MemLayout), PAGE_SIZE);
-  uint64_t BaseSize = AlignUp(std::get<2>(MemLayout), PAGE_SIZE);
-  err = uc_mem_map(uc, BasePtr, BaseSize, UC_PROT_ALL);
-  LogMan::Throw::A(!err, "Failed Map");
-
-  uint64_t STACKSIZE = 64 * 1024 * 1024;
-  uint64_t STACKOFFSET = AlignDown(0x1000000000 - STACKSIZE, PAGE_SIZE);
-  uint64_t SAFEZONE = 0x1000;
-  err = uc_mem_map(uc, STACKOFFSET, STACKSIZE, UC_PROT_ALL);
-  LogMan::Throw::A(!err, "Failed Stack Map");
-
-  err = uc_mem_map(uc, FS_OFFSET, 0x1000, UC_PROT_WRITE | UC_PROT_READ);
-  LogMan::Throw::A(!err, "Failed FS Map");
-
-  rsp = STACKOFFSET + STACKSIZE;
-
-  std::vector<uint8_t> Values = {
-      2,    0,   0,   0,   0,   0, 0, 0, // Argument count
-      0,    0,   0,   0,   0,   0, 0, 0, // Argument0 pointer
-      0,    0,   0,   0,   0,   0, 0, 0, // Argument1 pointer
-      'B',  'u', 't', 't', 's',          // Argument0
-      '\0',
-  };
-
-  rsp -= Values.size() + SAFEZONE;
-  uint64_t arg0offset = rsp + 8;
-  uint64_t arg0value = rsp + 24;
-  uc_mem_write(uc, rsp, &Values.at(0), Values.size());
-  uc_mem_write(uc, arg0offset, &arg0value, 8);
-  uc_mem_write(uc, arg0offset + 8, &arg0value, 8);
-
-  auto Writer = [&](void *Data, uint64_t Addr, uint64_t Size) {
-    // write machine code to be emulated to memory
-    if (uc_mem_write(uc, Addr, Data, Size)) {
-      LogMan::Msg::A("Failed to write emulation code to memory, quit!\n", "");
-    }
-  };
-
-  file.WriteLoadableSections(Writer);
-
-  printf("Setting RSP to 0x%zx (0x%zx - 0x%zx)\n", rsp, STACKOFFSET,
-         STACKOFFSET + STACKSIZE);
-  printf("Arg0 offset: 0x%zx\n", arg0offset);
-  // initialize machine registers
-  uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
-
-  uc_reg_write(uc, UC_X86_REG_RAX, &rax);
-  uc_reg_write(uc, UC_X86_REG_RBX, &rbx);
-  uc_reg_write(uc, UC_X86_REG_RCX, &rcx);
-  uc_reg_write(uc, UC_X86_REG_RDX, &rdx);
-  uc_reg_write(uc, UC_X86_REG_RSI, &rsi);
-  uc_reg_write(uc, UC_X86_REG_RDI, &rdi);
-  uc_reg_write(uc, UC_X86_REG_R8, &r8);
-  uc_reg_write(uc, UC_X86_REG_R9, &r9);
-  uc_reg_write(uc, UC_X86_REG_R10, &r10);
-  uc_reg_write(uc, UC_X86_REG_R11, &r11);
-  uc_reg_write(uc, UC_X86_REG_R12, &r12);
-  uc_reg_write(uc, UC_X86_REG_R13, &r13);
-  uc_reg_write(uc, UC_X86_REG_R14, &r14);
-  uc_reg_write(uc, UC_X86_REG_R15, &r15);
-
-  uint64_t EntryPoint = file.GetEntryPoint();
-  auto EntryPointSymbol = file.GetSymbol(EntryPoint);
-
-//   uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_BLOCK, (void*)hook_block, &file, 1, 0);
-
-  // tracing all instructions in the range [EntryPoint, EntryPoint+20]
-//  uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_CODE, (void*)hook_code64, &file, 1, 0);
-
-  uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_MEM_UNMAPPED, (void *)hook_unmapped, NULL, 1,
-              0);
-
-  if (auto Sym = file.GetSymbol("printf"))
-    uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_CODE, (void *)hook_printf, NULL,
-                Sym->Address, Sym->Address);
-
-
-  if (auto Sym = file.GetSymbol("puts"))
-    uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_CODE, (void *)hook_printf, (void*)1,
-                Sym->Address, Sym->Address);
-
-//  if (auto Sym = file.GetSymbol("_IO_puts"))
-//    uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_CODE, (void *)hook_printf, NULL,
-//                Sym->Address, Sym->Address);
-
-  if (auto Sym = file.GetSymbol("_dl_fatal_printf"))
-    uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_CODE, (void *)hook_printf, NULL,
-                Sym->Address, Sym->Address);
-
-  uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_BLOCK, (void *)hook_printf, NULL,
-              0x412500, 0x412500);
-
-  err = uc_hook_add(uc, &hooks.emplace_back(), UC_HOOK_INSN, (void *)hook_syscall, NULL, 1, 0, UC_X86_INS_SYSCALL);
-
-  if (err) {
-    printf("Failed on hook() with error returned %u: %s\n", err,
-           uc_strerror(err));
-  }
-
-  printf("Mapped BasePtr:    %016lx\n", BasePtr);
-  printf("Mapped to BasePtr: %016lx\n", BasePtr + BaseSize);
-  printf("EntryPoint:        %016lx\n", EntryPoint);
-  err = uc_emu_start(uc, EntryPoint, 0, 0, 0);
-  if (err) {
-    printf("Failed on uc_emu_start() with error returned %u: %s\n", err,
-           uc_strerror(err));
-  }
-
-  // now print out some registers
-  printf(">>> Emulation done. Below is the CPU context\n");
-
-  uc_reg_read(uc, UC_X86_REG_RAX, &rax);
-  uc_reg_read(uc, UC_X86_REG_RBX, &rbx);
-  uc_reg_read(uc, UC_X86_REG_RCX, &rcx);
-  uc_reg_read(uc, UC_X86_REG_RDX, &rdx);
-  uc_reg_read(uc, UC_X86_REG_RSI, &rsi);
-  uc_reg_read(uc, UC_X86_REG_RDI, &rdi);
-  uc_reg_read(uc, UC_X86_REG_R8, &r8);
-  uc_reg_read(uc, UC_X86_REG_R9, &r9);
-  uc_reg_read(uc, UC_X86_REG_R10, &r10);
-  uc_reg_read(uc, UC_X86_REG_R11, &r11);
-  uc_reg_read(uc, UC_X86_REG_R12, &r12);
-  uc_reg_read(uc, UC_X86_REG_R13, &r13);
-  uc_reg_read(uc, UC_X86_REG_R14, &r14);
-  uc_reg_read(uc, UC_X86_REG_R15, &r15);
-  uc_reg_read(uc, UC_X86_REG_RSP, &rsp);
-  uc_reg_read(uc, UC_X86_REG_RIP, &rip);
-  uc_reg_read(uc, UC_X86_REG_FS, &fs);
-
-
-  printf(">>> RAX = 0x%" PRIx64 "\n", rax);
-  printf(">>> RBX = 0x%" PRIx64 "\n", rbx);
-  printf(">>> RCX = 0x%" PRIx64 "\n", rcx);
-  printf(">>> RDX = 0x%" PRIx64 "\n", rdx);
-  printf(">>> RSI = 0x%" PRIx64 "\n", rsi);
-  printf(">>> RDI = 0x%" PRIx64 "\n", rdi);
-  printf(">>> R8 = 0x%" PRIx64 "\n", r8);
-  printf(">>> R9 = 0x%" PRIx64 "\n", r9);
-  printf(">>> R10 = 0x%" PRIx64 "\n", r10);
-  printf(">>> R11 = 0x%" PRIx64 "\n", r11);
-  printf(">>> R12 = 0x%" PRIx64 "\n", r12);
-  printf(">>> R13 = 0x%" PRIx64 "\n", r13);
-  printf(">>> R14 = 0x%" PRIx64 "\n", r14);
-  printf(">>> R15 = 0x%" PRIx64 "\n", r15);
-  printf(">>> RSP = 0x%" PRIx64 "\n", rsp);
-  printf(">>> RIP = 0x%" PRIx64 "\n", rip);
-  printf(">>> FS = 0x%" PRIx64 "\n", fs);
-
-  uc_close(uc);
+  functions.emplace_back(engine);
+  void *ptr = (void*)engine->getFunctionAddress(FunctionName);
+  return ptr;
 }
 
 int main(int argc, char **argv) {
-  LogMan::Throw::InstallHandler(ErrorHandler);
+  LogMan::Throw::InstallHandler(AssertHandler);
   LogMan::Msg::InstallHandler(MsgHandler);
 
-  LogMan::Throw::A(argc > 1, "Not enough arguments");
-  ELFLoader::ELFContainer file(argv[1]);
+  using namespace Emu::IR;
+  Emu::IR::IntrusiveIRList ir{8 * 1024 * 1024};
+#if 1
+  auto func = ir.AllocateOp<IROp_BeginFunction, OP_BEGINFUNCTION>();
+  func.first->Arguments = 1;
+  func.first->HasReturn = true;
 
-  TestUnicorn(file);
+  uint64_t ResultLocation = 0;
+  uint64_t DecLocation = 8;
+
+
+  {
+    auto header = ir.AllocateOp<IROp_BeginBlock, OP_BEGINBLOCK>();
+    IntrusiveIRList::IRPair<IROp_Jump> header_jump;
+    {
+      auto result = ir.AllocateOp<IROp_Constant, OP_CONSTANT>();
+      result.first->Constant = 0;
+
+      auto context = ir.AllocateOp<IROp_AllocateContext, OP_ALLOCATE_CONTEXT>();
+      context.first->Size = 16;
+
+      auto resultstore = ir.AllocateOp<IROp_StoreContext, OP_STORECONTEXT>();
+      resultstore.first->Size = 8;
+      resultstore.first->Offset = ResultLocation;
+      resultstore.first->Arg = result.second;
+
+      auto loop_store = ir.AllocateOp<IROp_StoreContext, OP_STORECONTEXT>();
+      loop_store.first->Size = 8;
+      loop_store.first->Offset = DecLocation;
+      loop_store.first->Arg = result.second;
+
+      header_jump = ir.AllocateOp<IROp_Jump, OP_JUMP>();
+    }
+    ir.AllocateOp<IROp_EndBlock, OP_ENDBLOCK>();
+
+    auto loop_body = ir.AllocateOp<IROp_BeginBlock, OP_BEGINBLOCK>();
+    header_jump.first->Target = loop_body.second;
+
+    IntrusiveIRList::IRPair<IROp_Jump> body_jump;
+    {
+      auto loop_load = ir.AllocateOp<IROp_LoadContext, OP_LOADCONTEXT>();
+      loop_load.first->Size = 8;
+      loop_load.first->Offset = DecLocation;
+
+      {
+        auto scale_amt = ir.AllocateOp<IROp_Constant, OP_CONSTANT>();
+        scale_amt.first->Constant = 3;
+
+        auto arg1 = ir.AllocateOp<IROp_GetArgument, OP_GETARGUMENT>();
+        arg1.first->Argument = 0;
+
+        auto loop_multiply = ir.AllocateOp<IROp_Shl, OP_SHL>();
+        loop_multiply.first->Args[0] = loop_load.second;
+        loop_multiply.first->Args[1] = scale_amt.second;
+
+        auto mem_offset = ir.AllocateOp<IROp_Add, OP_ADD>();
+        mem_offset.first->Args[0] = loop_multiply.second;
+        mem_offset.first->Args[1] = arg1.second;
+
+        auto loadmem = ir.AllocateOp<IROp_LoadMem, OP_LOAD_MEM>();
+        loadmem.first->Size = 8;
+        loadmem.first->Arg[0] = mem_offset.second;
+        loadmem.first->Arg[1] = ~0;
+
+        auto res_load = ir.AllocateOp<IROp_LoadContext, OP_LOADCONTEXT>();
+        res_load.first->Size = 8;
+        res_load.first->Offset = ResultLocation;
+
+        auto local_result = ir.AllocateOp<IROp_Add, OP_ADD>();
+        local_result.first->Args[0] = loadmem.second;
+        local_result.first->Args[1] = res_load.second;
+
+        auto res_store = ir.AllocateOp<IROp_StoreContext, OP_STORECONTEXT>();
+        res_store.first->Size = 8;
+        res_store.first->Offset = ResultLocation;
+        res_store.first->Arg = local_result.second;
+      }
+
+      auto inc_amt = ir.AllocateOp<IROp_Constant, OP_CONSTANT>();
+      inc_amt.first->Constant = 1;
+
+      auto loop_index = ir.AllocateOp<IROp_Add, OP_ADD>();
+      loop_index.first->Args[0] = loop_load.second;
+      loop_index.first->Args[1] = inc_amt.second;
+
+      auto loop_store = ir.AllocateOp<IROp_StoreContext, OP_STORECONTEXT>();
+      loop_store.first->Size = 8;
+      loop_store.first->Offset = DecLocation;
+      loop_store.first->Arg = loop_index.second;
+
+      auto loop_count = ir.AllocateOp<IROp_Constant, OP_CONSTANT>();
+      loop_count.first->Constant = 10000;
+
+      auto loop_remaining = ir.AllocateOp<IROp_Sub, OP_SUB>();
+      loop_remaining.first->Args[0] = loop_count.second;
+      loop_remaining.first->Args[1] = loop_index.second;
+
+      auto cond_jump = ir.AllocateOp<IROp_CondJump, OP_COND_JUMP>();
+      cond_jump.first->Cond = loop_remaining.second;
+      cond_jump.first->Target = loop_body.second;
+
+      body_jump = ir.AllocateOp<IROp_Jump, OP_JUMP>();
+    }
+    ir.AllocateOp<IROp_EndBlock, OP_ENDBLOCK>();
+
+    auto loop_end = ir.AllocateOp<IROp_BeginBlock, OP_BEGINBLOCK>();
+    body_jump.first->Target = loop_end.second;
+    {
+      auto loop_load = ir.AllocateOp<IROp_LoadContext, OP_LOADCONTEXT>();
+      loop_load.first->Size = 8;
+      loop_load.first->Offset = ResultLocation;
+
+      auto return_op = ir.AllocateOp<IROp_Return, OP_RETURN>();
+      return_op.first->Arg = loop_load.second;
+    }
+    ir.AllocateOp<IROp_EndBlock, OP_ENDBLOCK>();
+  }
+  ir.AllocateOp<IROp_EndFunction, OP_ENDFUNCTION>();
+#else
+  auto func = ir.AllocateOp<IROp_BeginFunction, OP_BEGINFUNCTION>();
+  func.first->Arguments = 1;
+  func.first->HasReturn = true;
+  ir.AllocateOp<IROp_BeginBlock, OP_BEGINBLOCK>();
+    auto result = ir.AllocateOp<IROp_Constant, OP_CONSTANT>();
+    result.first->Constant = 0xDEADBEEFBAD0DAD1ULL;
+    auto return_op = ir.AllocateOp<IROp_Return, OP_RETURN>();
+    return_op.first->Arg = result.second;
+  ir.AllocateOp<IROp_EndBlock, OP_ENDBLOCK>();
+  ir.AllocateOp<IROp_EndFunction, OP_ENDFUNCTION>();
+#endif
+
+  ir.Dump();
+
+  LLVMIRVisitor visit;
+
+  using PtrType = uint64_t (*)(uint64_t*);
+  PtrType ptr = (PtrType)visit.Visit(&ir);
+
+#define LOOP_SIZE 10000
+  std::vector<uint64_t> vals;
+  vals.reserve(LOOP_SIZE);
+  for (uint64_t i = 0; i < LOOP_SIZE; ++i) {
+    vals.emplace_back(i);
+  }
+
+	if (ptr) {
+		uint64_t ret = ptr(&vals.at(0));
+		printf("Ret: %zd\n", ret);
+		printf("ptr: 0x%p\n", ptr);
+		std::abort();
+	}
+	else {
+		printf("No return pointer passed\n");
+	}
   return 0;
 }

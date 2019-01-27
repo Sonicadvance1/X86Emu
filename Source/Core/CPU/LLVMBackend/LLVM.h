@@ -2,5 +2,6 @@
 #include "Core/CPU/CPUBackend.h"
 
 namespace Emu {
-CPUBackend *CreateLLVMBackend();
+class CPUCore;
+CPUBackend *CreateLLVMBackend(Emu::CPUCore *CPU);
 }

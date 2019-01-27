@@ -15,6 +15,7 @@ enum InstType {
   TYPE_REX_PREFIX,
   TYPE_MODRM_TABLE_PREFIX,
   TYPE_INST,
+  TYPE_INVALID,
 };
 enum InstFlags {
   FLAGS_NONE                = 0,
@@ -22,7 +23,11 @@ enum InstFlags {
   FLAGS_DISPLACE_SIZE_MUL_2 = (1 << 1),
   FLAGS_DISPLACE_SIZE_DIV_2 = (1 << 2),
   FLAGS_REX_IN_BYTE         = (1 << 3),
-  FLAGS_BLOCK_END           = (1 << 4),
+  FLAGS_SRC_MODRM           = (1 << 4),
+  FLAGS_DST_MODRM           = (1 << 5),
+  FLAGS_SRC_IMM             = (1 << 6),
+  FLAGS_BLOCK_END           = (1 << 7),
+  FLAGS_SETS_RIP            = (1 << 8),
 };
 
 enum DecodeFlags {
@@ -32,6 +37,7 @@ enum DecodeFlags {
   DECODE_FLAG_ADSIZE = (1 << 2),
   DECODE_FLAG_MODRM  = (1 << 3),
   DECODE_FLAG_SIB    = (1 << 4),
+  DECODE_FLAG_LOCK   = (1 << 5),
 
 };
 struct X86InstDecodeFlags {
@@ -47,7 +53,7 @@ using OpDispatchPtr = void (IR::OpDispatchBuilder::*)(Emu::X86Tables::DecodedOp,
 struct X86InstInfo {
   char const *Name;
   InstType Type;
-  uint8_t Flags; ///< Must be larger than InstFlags enum
+  uint16_t Flags; ///< Must be larger than InstFlags enum
   uint8_t MoreBytes;
   OpDispatchPtr OpcodeDispatcher;
 };

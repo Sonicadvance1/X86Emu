@@ -26,5 +26,6 @@ struct X86State {
   uint64_t xmm[16][2];
   uint64_t gs;
   uint64_t fs;
+  uint64_t rflags;
 };
 }
